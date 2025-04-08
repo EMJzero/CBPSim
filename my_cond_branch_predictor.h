@@ -54,6 +54,7 @@ class SampleCondPredictor
             return hist_to_use.tage_pred;
         }
 
+        // AKA: speculative update
         void history_update (uint64_t seq_no, uint8_t piece, uint64_t PC, bool taken, uint64_t nextPC)
         {
             active_hist.ghist = active_hist.ghist << 1;

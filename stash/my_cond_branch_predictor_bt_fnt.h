@@ -50,6 +50,7 @@ class SampleCondPredictor
             return PC >= nextPC;
         }
 
+        // AKA: speculative update
         void history_update (uint64_t seq_no, uint8_t piece, uint64_t PC, bool taken, uint64_t nextPC)
         {
             if(taken) {

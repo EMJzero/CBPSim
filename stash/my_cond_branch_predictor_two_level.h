@@ -121,6 +121,7 @@ public:
         return pred_taken;
     }
 
+    // AKA: speculative update
     // Called immediately after prediction, to speculatively update predictor history.
     // For the PA predictor, update the branch history register with the outcome.
     void history_update(uint64_t seq_no, uint8_t piece, uint64_t PC, bool taken, uint64_t nextPC)
