@@ -7,13 +7,17 @@
 #include <cstdint>
 #include <cmath>
 
-// Configuration defines (example values based on L-TAGE from the paper)
-#define NUM_TAGGED_TABLES 12
-#define BASE_BITS 14 // 16K entries for base (2^14)
-#define MAX_HISTORY 640
-#define USE_ALT_THRESHOLD 8 // 4-bit counter, threshold 8 (mid-point)
+// Configuration defines (values based on L-TAGE)
+#define NUM_TAGGED_TABLES 12 // 12 TAGE tables
+#define BASE_INDEX_BITS 14   // 16K entries for the base predictor (2^14)
+#define BASE_PRED_BITS 2     // 2-bit counters for the base predictor [max is 8]
+#define MAX_HISTORY 640      // 640 global history bits
+#define TAGE_PRED_BITS 3     // 3-bit signed predictor (-4 to 3) [max is 8]
+#define TAGE_USEFUL_BITS 2   // 2-bit usefulness [max is 8]
+#define USE_ALT_THRESHOLD 8  // 4-bit counter, threshold 8 (mid-point)
+#define MAX_BYTES 192 * 1024 // 192KB of memory budget
 
-// Tagged Table Configuration (example parameters)
+// Tagged Table Configuration
 struct TableConfig {
     int hist_len;   // History length L(i)
     int index_bits; // log2(number of entries)
@@ -23,7 +27,7 @@ struct TableConfig {
 
 // Configure each tagged table (adjust based on your needs)
 const TableConfig TAGGED_CONFIGS[NUM_TAGGED_TABLES] = {
-    {4, 10, 7},  // T1: 1K entries, 7-bit tag
+    {4, 10, 7},  // T1: 4 history bits, 2^10 entries, 7-bit tag
     {6, 10, 7},  // T2
     {10, 11, 8}, // T3
     {16, 11, 8}, // T4
@@ -39,14 +43,14 @@ const TableConfig TAGGED_CONFIGS[NUM_TAGGED_TABLES] = {
 
 class SampleCondPredictor {
 private:
-    // Base predictor: 2-bit counters
-    std::vector<uint8_t> base_table;
+    // Base predictor: BASE_PRED_BITS-bit counters
+    std::vector<int8_t> base_table;
 
     // Tagged tables
     struct TaggedEntry {
         uint16_t tag;
-        int8_t ctr; // 3-bit signed (-4 to 3)
-        uint8_t u;  // 2-bit usefulness
+        int8_t ctr; // TAGE_PRED_BITS-bit signed (-4 to 3)
+        uint8_t u;  // TAGE_USEFUL_BITS-bit usefulness
     };
     std::vector<std::vector<TaggedEntry>> tagged_tables;
 
@@ -59,7 +63,7 @@ private:
 
     // Reset counter for usefulness
     uint32_t reset_counter;
-    static constexpr uint32_t RESET_PERIOD = 512 * 1024; // From paper
+    static constexpr uint32_t RESET_PERIOD = 512 * 1024; // From L-TAGE
 
     // Speculative state tracking
     struct SpeculativeState {
@@ -81,10 +85,22 @@ private:
         return hash & ((1ULL << out_bits) - 1);
     }
 
+    // Estimate memory usage and check against budget
+    void check_memory_budget() {
+        size_t size = MAX_HISTORY; //GHR
+        size += (1 << BASE_INDEX_BITS)*BASE_PRED_BITS; // base predictor
+        for (const auto& cfg : TAGGED_CONFIGS) {
+            size += cfg.entries()*(cfg.tag_bits + TAGE_PRED_BITS + TAGE_USEFUL_BITS); // tables
+        }
+        size = (size >> 3) + (size & 7 > 0 ? 1 : 0); // bits -> bytes
+        std::cout << "Memory used: " << size << "B / " << MAX_BYTES << "B" << std::endl;
+        assert(size <= MAX_BYTES && "Predictor exceeds MAX_BYTES memory limit! Reduce HISTORY_LENGTH or MAX_TABLE_ENTRIES.");
+    }
+
 public:
     SampleCondPredictor() : max_hist(MAX_HISTORY), use_alt_on_na(8), reset_counter(0) {
         // Initialize base table
-        base_table.resize(1 << BASE_BITS, 2); // Initial state: weakly taken
+        base_table.resize(1 << BASE_INDEX_BITS, 0); // Initial state: weakly taken
 
         // Initialize tagged tables
         for (const auto& cfg : TAGGED_CONFIGS) {
@@ -92,12 +108,11 @@ public:
         }
     }
 
-    void setup()
-    {
+    void setup() {
+        check_memory_budget();
     }
 
-    void terminate()
-    {
+    void terminate() {
     }
 
     uint64_t get_unique_inst_id(uint64_t seq_no, uint8_t piece) const {
@@ -112,7 +127,7 @@ public:
 
         // Base prediction
         uint64_t base_idx = PC % base_table.size();
-        bool base_pred = (base_table[base_idx] >= 2);
+        bool base_pred = (base_table[base_idx] >= 0);
 
         // Find provider and altpred
         state.provider_table = -1;
@@ -144,7 +159,7 @@ public:
             }
         }
 
-        // Use altpred if weak and USE_ALT_ON_NA
+        // Use altpred if weak and use_alt_on_na
         if (state.provider_table != -1) {
             auto& entry = tagged_tables[state.provider_table][
                 compute_hash(PC, ghr, TAGGED_CONFIGS[state.provider_table].hist_len,
@@ -198,15 +213,15 @@ public:
 
             // Update prediction counter
             if (resolveDir) {
-                entry.ctr = std::min(entry.ctr + 1, 3);
+                entry.ctr = std::min(entry.ctr + 1, (1 << (TAGE_PRED_BITS - 1)) - 1);
             } else {
-                entry.ctr = std::max(entry.ctr - 1, -4);
+                entry.ctr = std::max(entry.ctr - 1, (-1 << (TAGE_PRED_BITS - 1)));
             }
 
             // Update usefulness counter
             if (state.altpred != predDir) {
                 if (resolveDir == predDir) {
-                    entry.u = std::min(entry.u + 1, 3);
+                    entry.u = std::min(entry.u + 1, (1 << TAGE_USEFUL_BITS) - 1);
                 } else {
                     entry.u = std::max(entry.u - 1, 0);
                 }
@@ -214,7 +229,7 @@ public:
 
             // Allocation on misprediction
             if (!resolveDir == predDir) {
-                // Simplified allocation: find first table with u=0
+                // Dumb allocation: find first table with u = 0
                 for (int k = state.provider_table + 1; k < NUM_TAGGED_TABLES; ++k) {
                     auto& alloc_cfg = TAGGED_CONFIGS[k];
                     auto& alloc_table = tagged_tables[k];
@@ -231,13 +246,13 @@ public:
             // Update base table
             uint64_t base_idx = PC % base_table.size();
             if (resolveDir) {
-                base_table[base_idx] = std::min(base_table[base_idx] + 1, 3);
+                base_table[base_idx] = std::min(base_table[base_idx] + 1, (1 << (BASE_PRED_BITS - 1)) - 1);
             } else {
-                base_table[base_idx] = std::max(base_table[base_idx] - 1, 0);
+                base_table[base_idx] = std::max(base_table[base_idx] - 1, (-1 << (BASE_PRED_BITS - 1)));
             }
         }
 
-        // Update USE_ALT_ON_NA
+        // Update use_alt_on_na
         if (state.provider_table != -1) {
             if ((state.altpred == resolveDir) && (predDir != resolveDir)) {
                 use_alt_on_na = std::min(use_alt_on_na + 1, 15);
@@ -251,7 +266,7 @@ public:
             reset_counter = 0;
             for (auto& table : tagged_tables) {
                 for (auto& entry : table) {
-                    entry.u >>= 1; // Simplified reset
+                    entry.u >>= 1; // Dumb reset
                 }
             }
         }
