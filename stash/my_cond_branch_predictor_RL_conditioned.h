@@ -34,9 +34,9 @@ class SampleCondPredictor
     // HP: instructions commit within 256 cycles.
 
     // --- Tunable Parameters ---
-    static constexpr uint32_t HISTORY_LENGTH = 245; //501         // Number of recent branches tracked
+    static constexpr uint32_t HISTORY_LENGTH = 247; //501         // Number of recent branches tracked
     static constexpr uint32_t HISTORY_LENGTH_BUFFER = 64; //16    // Number of extra recent branches tracked
-    static constexpr uint8_t ID_LENGTH = 10;                      // ID length for branches on the same entry (this amount of least significant bits of the PC is moved from indexing the table entry to a part of the state)
+    static constexpr uint8_t ID_LENGTH = 8; //10                  // ID length for branches on the same entry (this amount of least significant bits of the PC is moved from indexing the table entry to a part of the state)
     static constexpr uint8_t WEIGHT_BITS = 8;                     // Weight resolution (in bits)
     static constexpr uint32_t THETA = 1.93 * HISTORY_LENGTH + 14; // Confidence threshold for training
     static constexpr uint8_t LEARNING_RATE = 1;                   // Weight update step
@@ -75,9 +75,10 @@ public:
     }
 
     // Compute idx of the weights for the present PC
-    // TODO: be smarter than just a <mod>
     uint64_t get_weights_idx(uint64_t PC) const {
-        return (PC >> ID_LENGTH) % MAX_TABLE_ENTRIES;
+        uint64_t key = PC >> ID_LENGTH;
+        key = (key >> 16) ^ (key & 0xFFFF);
+        return key % MAX_TABLE_ENTRIES;
     }
 
     // Predict using linear Q(s,a) = wᵀ·ϕ(s)
@@ -85,8 +86,13 @@ public:
         (void)tage_pred;
 
         auto& w = weights[get_weights_idx(PC)];
+        // Random weights initialization
         if (w.empty()) {
             w.resize(NUM_FEATURES, 0);
+            for (auto& weight : w) {
+                weight = (rand() % 3) - 1;  // -1, 0, or 1
+                //weight = (random() % (1 << WEIGHT_BITS)) - (1 << WEIGHT_BITS - 1);  // -1, 0, or 1
+            }
         }
 
         // Compute dot product between weights and GHR-based features
