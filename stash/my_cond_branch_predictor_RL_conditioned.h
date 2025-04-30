@@ -36,16 +36,17 @@ class SampleCondPredictor
     // --- Tunable Parameters ---
     static constexpr uint32_t HISTORY_LENGTH = 247; //501         // Number of recent branches tracked
     static constexpr uint32_t HISTORY_LENGTH_BUFFER = 64; //16    // Number of extra recent branches tracked
-    static constexpr uint8_t ID_LENGTH = 8; //10                  // ID length for branches on the same entry (this amount of least significant bits of the PC is moved from indexing the table entry to a part of the state)
-    static constexpr uint8_t WEIGHT_BITS = 8;                     // Weight resolution (in bits)
+    static constexpr uint8_t ID_LENGTH = 4; //10                  // ID length for branches on the same entry (this amount of least significant bits of the PC is moved from indexing the table entry to a part of the state)
+    static constexpr uint8_t WEIGHT_BITS = 3;                     // Weight resolution (in bits)
     static constexpr uint32_t THETA = 1.93 * HISTORY_LENGTH + 14; // Confidence threshold for training
     static constexpr uint8_t LEARNING_RATE = 1;                   // Weight update step
-    static constexpr uint32_t MAX_TABLE_ENTRIES = 512; //1024     // Max number of PCs tracked
+    static constexpr uint32_t MAX_TABLE_ENTRIES = 2048; //1024    // Max number of PCs tracked
     static constexpr size_t MAX_BYTES = 192 * 1024;               // Memory budget: 192KB
 
     static constexpr uint16_t NUM_FEATURES = HISTORY_LENGTH + ID_LENGTH + 1; // +1 for bias
     static constexpr int8_t WEIGHT_MAX = (1 << (WEIGHT_BITS - 1)) - 1;
     static constexpr int8_t WEIGHT_MIN = -(1 << (WEIGHT_BITS - 1));
+    static constexpr uint32_t NORM_HIST_VS_ID = HISTORY_LENGTH / ID_LENGTH;  // Ensure that weights from the GHR as much as the PC ones
 
     // --- Internal State ---
     uint8_t pred_cycle;                                             // Cyclic counter of prediction
@@ -89,9 +90,13 @@ public:
         // Random weights initialization
         if (w.empty()) {
             w.resize(NUM_FEATURES, 0);
-            for (auto& weight : w) {
-                weight = (rand() % 3) - 1;  // -1, 0, or 1
-                //weight = (random() % (1 << WEIGHT_BITS)) - (1 << WEIGHT_BITS - 1);  // -1, 0, or 1
+            w[0] = (rand() % 3) - 1;
+            for (int i = 0; i < HISTORY_LENGTH; i++) {
+                w[i + 1] = (rand() % 3) - 1;
+            }
+            for (uint i = 1; i <= ID_LENGTH; i++) {
+                bool bit = (PC >> i) & 1;
+                w[HISTORY_LENGTH + i] = (rand() % 3) - 1;
             }
         }
 
@@ -102,7 +107,7 @@ public:
         }
         for (uint i = 1; i <= ID_LENGTH; i++) {
             bool bit = (PC >> i) & 1;
-            sum += bit ? w[HISTORY_LENGTH + i] : -w[HISTORY_LENGTH + i];
+            sum += (bit ? w[HISTORY_LENGTH + i] : -w[HISTORY_LENGTH + i])*NORM_HIST_VS_ID;
         }
 
         // Save current prediction for future weights updates
