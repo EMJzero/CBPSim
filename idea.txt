@@ -1,0 +1,50 @@
+IDEA: at best we misspredict 50% of the count of distinct branches in the code (slightly less if we use FNTBT)
+
+Replay-based BP:
+- for each branch in the code, store the history of its past behavior, plus flags that indicate each point in the history between instances of seeing the branch when the PC went backward, skipping over the branch (each branch must also indicate how further back the PC went);
+- each time you see a branch, take the last time you jumped backward over such a branch, and pick the PC of such jump, then go backward in the history for that branch until the first instance of a flag with that PC. From then predict the present branch's behaviour by replaying the history from the flag onward. If you misspredict, update that bit in the history;
+[each branch is essentially assigned a tape and behaves like a turing machine, on the tape it writes 0/1 for branch outcomes, interleaved by the flags of the PC going backward over the branch, whenever you encounter the branch, either add an entry to the tape, or roll the tape back to the first flag of a matching PC to the last backward jump you did, and update it from there onward]
+
+Actual implementation:
+- first time you see a branch, add to it a 2-bit saturating counter as a predictor
+- each time a jump goes backward, passes over a branch, and lands at a lower PC, ...
+
+Actual implementation true:
+- each branch is given a tape (like a 1T turing machine)
+- first time seing a branch, use FNTBT, write outcome on the tape
+- first backward jump going over the branch, windup all the tape and write the jump's target PC in the first empty slot during the windup
+- from then, continue using the tape from where you planted the flag onward, skipping over any flag and with the outcomes you encounter being the predictions, that get updated in-place when wrong
+- whan another jump goes over the branch, windup again, and stop only when:
+  - you wund up all the tape and found an empty slot, thus plant the flag/target-PC there, then right after you on the tape should be another flag, until the current PC goes over that flag's PC, insert branch outcomes in between the flags (WRONG - if you see the branch, the flag's PC is already being surpassed)
+  - you encounter a flag with the same PC, in which case you simply stop and replay the tape from there the next time the branch is encountered
+  - you encounter a flag with a lower PC, ... where the hell do I plant the flag?
+
+Implementation for real this time:
+- each branch is given a tape (like a 1T turing machine)
+- each time the branch is seen, write its outcome to the tape and move forward by one (we could consider compressing multiple identical outcomes as a bit for the outcome followed by a base 2 number of times it was repeated, followed by a special symbol to space out outcomes)
+- each time a backward jump goes over the branch (except its own jump), write the jump's target PC on the tape and rewind the tape to the very start, for each other PC you encoutner
+- each subsequent time you see the branch, the tape gives you the prediction, that you can correct in-place if it turns out wrong, and when you reach the point where you wrote a PC, skip that tape entry, but increase a counter internal to it of how many times this has happened
+- if the next tape entry is empty or a PC, the prediction is given by a 2-bit saturating counter kept separately for the branch
+
+Implementation with some thought now:
+- default predictor 2-bit saturating counter kept separately for each branch (with some collisions)
+- each branch is given a tape (like a 1T turing machine)
+- each time the branch is seen, write its outcome to the tape and move forward by one (we could consider compressing multiple identical outcomes as a bit for the outcome followed by a base 2 number of times it was repeated, followed by a special symbol to space out outcomes)
+- the first time a backward jump goes over the branch and lands on a lower PC (except the branch's own jump), write a counter on the next tape entry together with the target PC of the jump, rewind the tape, and start predicting branches by reading the tape (skip over any PC and counter entries you may find)
+- any other time a backward jump goes over the branch and lands on a lower PC:
+  - if the next entry on the branch's tape is a counter associated with the same PC as the current target one, increase the counter and rewind the tape to the start
+  - otherwise, ...
+- no more space? Delete the tape for the branch with the lowest PC
+
+Implementation for real? Let's see:
+- default FNTBT predictor
+- multiple tapes for each branch
+- first time you see a branch, create a tape with no tag for the branch, set it as "active", and write on the tape the outcome of the branch, then move the tape forward by one
+- if not empty, the current entry of a branch's active tape is the current prediction for that branch
+- first time a jump goes backward over the branch and lands at a lower PC, tag the above tagless tape with the jump's target PC and rewind the tape to the first written entry (keep the tape active and now use it to predict)
+- at any subsequent encounter of the ...
+
+Insight:
+- I do not need an infinite history, for any branch B I only need the history back until the last time the PC went backward and passed over B in the process
+- Look at branches as a control flow directed graph, with a node placed at the same "y" as its PC, as to highlight edges going forward and backward in PC
+- For each branch I should have a "replay" prediction (= 2-bit sat. counter) ready for each incoming edge paired with the last target PC to which we jumped while going over the present branch's PC, and the global history up to such PC

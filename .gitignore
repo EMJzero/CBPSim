@@ -3,3 +3,4 @@
 cbp
 *.csv
 *.log
+.vscode/*
